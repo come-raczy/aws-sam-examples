@@ -57,8 +57,25 @@ Note: when environment variables are secret and shouldn't be in the `template.ya
 the AWS CLI. In that case, it is important to set **all the environment variables**, otherwise the unset variables
 will be removed:
 
-    aws lambda update-function-configuration --function-name $FUNCTION_NAME \
-        --environment "Variables={PUBLIC_VAR=some-value,SECRET_VAR=$SECRET_VAR}"
+      aws lambda update-function-configuration --function-name $FUNCTION_NAME \
+          --environment "Variables={PUBLIC_VAR=some-value,SECRET_VAR=$SECRET_VAR}"
+
+Other options:
+
+- Store secrets in the Parameters section of the `template.yaml` and use the `sam deploy --parameter-overrides` option.
+- Define them as a [Secrets Manager secret]
+  (https://docs.aws.amazon.com/secretsmanager/latest/userguide/manage_create-basic-secret.html) and use the
+  [dynamic reference]
+  (https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/dynamic-references.html#dynamic-references-secretsmanager)
+  in the template: `{{resolve:secretsmanager:MyFunctionSecrets:SecretString:variable_name}}`.
+- Pass the secrets in the payload of the `aws lambda invoke` command.
+- Use secrets Manager and lookup the value in the code.
+- Encrypt the value using [AWS Key Management Service]
+  (https://docs.aws.amazon.com/kms/latest/developerguide/overview.html) and pass the encrypted value, base64-encoded,
+  and call KMS in the function to decrypt it.
+
+See [Do not embed credentials in your templates]
+(https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/security-best-practices.html#creds) for more.
 
 ### Defined runtime environment variables
 
@@ -84,3 +101,45 @@ This is the list of environment variables that are defined by the runtime:
   The host and port of the [runtime API](https://docs.aws.amazon.com/lambda/latest/dg/runtimes-api.html).
 - `LAMBDA_TASK_ROOT`: the path to the function code.
 - `LAMBDA_RUNTIME_DIR`: the path to the runtime code.
+
+## Secrets
+
+The most straightforward is to use the [Secret Manager](https://us-west-1.console.aws.amazon.com/secretsmanager):
+
+This requires the Lambda execution role to have the secretsmanager:GetSecretValue permission to the secret.
+if the secter is encrypted with a customer managed key (instead of the AWS managed key aws/secretmanager), the
+Lambda execution role must have the kms:Decrypt permission to the key.
+
+In the `template.yaml`, at the bottom of the "Properties" for the function, add the policy:
+
+          Policies:
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: "arn:aws:secretsmanager:us-west-1:<account-number>:secret:name_of_my_secret-######"
+
+Where the "SecretArn" os copied from the Secret Manager.
+
+Assuming a generic secret the is not a database credential, the steps are:
+
+- Select "Store a new secret"
+- Select "Other type of secret" for the "Secret type"
+- Add all the relevant key-value pairs (epg. "API_KEY" for various services)
+- Select aws/secretmanager for the Encryption key
+- On the next page, select the **secret name**
+- Once created, the arn and sample code to retrieve the secret are shown
+
+The sample code is generic, for instance, in python:
+
+    import boto3
+    from botocore.exceptions import ClientError
+
+    def get_secret(secret_name: str, region_name: str = "us-west-1"):
+        # Create a Secrets Manager client
+        session = boto3.session.Session()
+        client = session.client(service_name="secretsmanager", region_name=region_name)
+        try:
+            get_secret_value_response = client.get_secret_value(SecretId=secret_name)
+        except ClientError as e:
+            # For a list of exceptions thrown, see
+            # https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_GetSecretValue.html
+            raise e
+        return get_secret_value_response["SecretString"]
